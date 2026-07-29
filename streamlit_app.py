@@ -10,10 +10,24 @@ import pandas as pd
 import streamlit as st
 
 from storage import DAYS, Database
+PDF_SUPPORT_ERROR = ""
 try:
     from pdf_reports import build_schedule_pdf
 except ModuleNotFoundError as exc:
-    if exc.name != "pdf_reports":
+    if exc.name == "pdf_reports":
+        try:
+            import reportlab  # noqa: F401
+        except ModuleNotFoundError:
+            PDF_SUPPORT_ERROR = (
+                "PDF downloads are temporarily unavailable because reportlab is not installed. "
+                "Add reportlab>=4,<5 to requirements.txt and reboot the app."
+            )
+    elif str(exc.name).startswith("reportlab"):
+        PDF_SUPPORT_ERROR = (
+            "PDF downloads are temporarily unavailable because reportlab is not installed. "
+            "Add reportlab>=4,<5 to requirements.txt and reboot the app."
+        )
+    else:
         raise
 
     def build_schedule_pdf(
@@ -125,6 +139,10 @@ except ModuleNotFoundError as exc:
             story.append(table)
         document.build(story)
         return output.getvalue()
+
+if PDF_SUPPORT_ERROR:
+    def build_schedule_pdf(*args, **kwargs) -> bytes:
+        return b""
 
 
 st.set_page_config(
@@ -1150,7 +1168,9 @@ def page_planning() -> None:
         st.dataframe(pd.DataFrame(crew_rows), use_container_width=True, hide_index=True)
     with tabs[5]:
         assignment_table(final)
-        if final:
+        if final and PDF_SUPPORT_ERROR:
+            st.warning(PDF_SUPPORT_ERROR, icon="⚠️")
+        if final and not PDF_SUPPORT_ERROR:
             st.subheader("Download final crew schedules")
             st.download_button(
                 "Download complete final schedule PDF",
