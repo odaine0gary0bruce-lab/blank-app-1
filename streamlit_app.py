@@ -141,8 +141,222 @@ except ModuleNotFoundError as exc:
         return output.getvalue()
 
 if PDF_SUPPORT_ERROR:
-    def build_schedule_pdf(*args, **kwargs) -> bytes:
-        return b""
+    PDF_SUPPORT_ERROR = ""
+
+    def build_schedule_pdf(
+        assignments,
+        crew_name: str | None = None,
+        title: str = "Final Maintenance Schedule",
+    ) -> bytes:
+        """Create a readable crew schedule PDF using only the Python standard library."""
+        from collections import defaultdict
+        import textwrap
+
+        def plain(value: Any) -> str:
+            return (
+                str(value if value is not None else "")
+                .replace("\u2013", "-")
+                .replace("\u2014", "-")
+                .encode("latin-1", "replace")
+                .decode("latin-1")
+            )
+
+        def pdf_string(value: Any) -> str:
+            return (
+                plain(value)
+                .replace("\\", "\\\\")
+                .replace("(", "\\(")
+                .replace(")", "\\)")
+            )
+
+        def text_command(x: float, y: float, value: Any, size: float = 9, bold: bool = False) -> str:
+            font = "F2" if bold else "F1"
+            return (
+                f"BT /{font} {size:.1f} Tf 0.08 0.15 0.25 rg "
+                f"1 0 0 1 {x:.1f} {y:.1f} Tm ({pdf_string(value)}) Tj ET"
+            )
+
+        def wrapped(value: Any, width: int, lines: int = 2) -> list[str]:
+            result = textwrap.wrap(
+                plain(value),
+                width=max(4, width),
+                break_long_words=True,
+                break_on_hyphens=True,
+            ) or [""]
+            if len(result) > lines:
+                result = result[:lines]
+                result[-1] = (result[-1][:-3] + "...") if len(result[-1]) > 3 else "..."
+            return result
+
+        rows = [dict(row) for row in assignments]
+        if crew_name:
+            rows = [row for row in rows if str(row.get("team_label", "")) == crew_name]
+        rows.sort(key=lambda row: (
+            str(row.get("team_label", "")).lower(),
+            str(row.get("scheduled_date", "")),
+            str(row.get("start_at", "")),
+            str(row.get("work_order_id", "")),
+        ))
+        grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in rows:
+            grouped[str(row.get("team_label") or "Unassigned Crew")].append(row)
+
+        page_groups: list[tuple[str, list[str], list[dict[str, Any]], int]] = []
+        if not grouped:
+            page_groups.append(("No assigned crew", [], [], 0))
+        for crew, crew_rows in grouped.items():
+            people: list[str] = []
+            for row in crew_rows:
+                for person in str(row.get("assigned_technicians", "")).split(","):
+                    person = person.strip()
+                    if person and person not in people:
+                        people.append(person)
+            for chunk_number, start in enumerate(range(0, len(crew_rows), 9)):
+                page_groups.append((crew, people, crew_rows[start:start + 9], chunk_number))
+
+        page_streams: list[bytes] = []
+        generated_label = datetime.now().strftime("%Y-%m-%d %H:%M")
+        columns = [
+            ("Date / day", 108, 22),
+            ("Time", 70, 13),
+            ("Work order", 82, 15),
+            ("Job", 190, 38),
+            ("Location", 142, 28),
+            ("Hours", 48, 8),
+            ("Status", 70, 13),
+        ]
+        table_x = 41.0
+        table_width = sum(column[1] for column in columns)
+
+        for page_number, (crew, people, crew_rows, chunk_number) in enumerate(page_groups, start=1):
+            commands = [
+                "q 0.96 0.98 1.00 rg 0 0 792 612 re f Q",
+                "q 0.07 0.23 0.44 rg 0 592 792 20 re f Q",
+                text_command(41, 558, title, 20, True),
+                text_command(
+                    41, 538,
+                    f"Generated {generated_label} - {len(rows)} scheduled job"
+                    f"{'s' if len(rows) != 1 else ''}",
+                    9,
+                ),
+                text_command(
+                    41, 510,
+                    f"{crew}{' (continued)' if chunk_number else ''}",
+                    15,
+                    True,
+                ),
+            ]
+            people_label = f"Crew size: {len(people)}   People: {', '.join(people) or 'No members listed'}"
+            commands.append(text_command(41, 492, people_label[:125], 9))
+
+            header_top = 474.0
+            header_height = 24.0
+            commands.extend([
+                f"q 0.86 0.92 0.99 rg {table_x:.1f} {header_top - header_height:.1f} "
+                f"{table_width:.1f} {header_height:.1f} re f Q",
+                f"q 0.70 0.78 0.88 RG 0.6 w {table_x:.1f} {header_top - header_height:.1f} "
+                f"{table_width:.1f} {header_height:.1f} re S Q",
+            ])
+            x = table_x
+            for label, column_width, _ in columns:
+                commands.append(text_command(x + 4, header_top - 16, label, 8, True))
+                commands.append(
+                    f"q 0.70 0.78 0.88 RG 0.4 w {x:.1f} {header_top - header_height:.1f} "
+                    f"m {x:.1f} {header_top:.1f} l S Q"
+                )
+                x += column_width
+
+            row_top = header_top - header_height
+            row_height = 42.0
+            if not crew_rows:
+                commands.append(text_command(48, row_top - 25, "No final schedule assignments are available.", 10))
+            for row_index, row in enumerate(crew_rows):
+                top = row_top - row_index * row_height
+                bottom = top - row_height
+                if row_index % 2:
+                    commands.append(
+                        f"q 0.97 0.98 0.99 rg {table_x:.1f} {bottom:.1f} "
+                        f"{table_width:.1f} {row_height:.1f} re f Q"
+                    )
+                commands.append(
+                    f"q 0.76 0.82 0.90 RG 0.4 w {table_x:.1f} {bottom:.1f} "
+                    f"{table_width:.1f} {row_height:.1f} re S Q"
+                )
+                scheduled_date = str(row.get("scheduled_date", ""))
+                day = str(row.get("day", ""))
+                start_label = str(row.get("start_at", ""))[11:16]
+                end_label = str(row.get("end_at", ""))[11:16]
+                try:
+                    hours_label = f"{float(row.get('assigned_hours', 0)):.1f}"
+                except (TypeError, ValueError):
+                    hours_label = "0.0"
+                values = [
+                    f"{scheduled_date} / {day}" if scheduled_date else day,
+                    f"{start_label}-{end_label}" if start_label or end_label else "",
+                    row.get("work_order_id", ""),
+                    row.get("title", ""),
+                    row.get("location", ""),
+                    hours_label,
+                    row.get("status", "Scheduled"),
+                ]
+                x = table_x
+                for value, (_, column_width, character_width) in zip(values, columns):
+                    for line_number, line in enumerate(wrapped(value, character_width, 3)):
+                        commands.append(
+                            text_command(x + 4, top - 13 - line_number * 10, line, 8)
+                        )
+                    commands.append(
+                        f"q 0.76 0.82 0.90 RG 0.4 w {x:.1f} {bottom:.1f} "
+                        f"m {x:.1f} {top:.1f} l S Q"
+                    )
+                    x += column_width
+            commands.append(text_command(41, 24, "Maintainly - Crew schedule", 8))
+            commands.append(text_command(704, 24, f"Page {page_number}", 8))
+            page_streams.append("\n".join(commands).encode("latin-1"))
+
+        object_count = 4 + len(page_streams) * 2
+        objects: dict[int, bytes] = {
+            1: b"<< /Type /Catalog /Pages 2 0 R >>",
+            3: b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+            4: b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>",
+        }
+        page_references = []
+        for index, stream in enumerate(page_streams):
+            content_id = 5 + index * 2
+            page_id = content_id + 1
+            page_references.append(f"{page_id} 0 R")
+            objects[content_id] = (
+                f"<< /Length {len(stream)} >>\nstream\n".encode("ascii")
+                + stream
+                + b"\nendstream"
+            )
+            objects[page_id] = (
+                f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 792 612] "
+                f"/Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> "
+                f"/Contents {content_id} 0 R >>"
+            ).encode("ascii")
+        objects[2] = (
+            f"<< /Type /Pages /Kids [{' '.join(page_references)}] "
+            f"/Count {len(page_streams)} >>"
+        ).encode("ascii")
+
+        pdf = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+        offsets = [0] * (object_count + 1)
+        for object_id in range(1, object_count + 1):
+            offsets[object_id] = len(pdf)
+            pdf.extend(f"{object_id} 0 obj\n".encode("ascii"))
+            pdf.extend(objects[object_id])
+            pdf.extend(b"\nendobj\n")
+        xref_offset = len(pdf)
+        pdf.extend(f"xref\n0 {object_count + 1}\n".encode("ascii"))
+        pdf.extend(b"0000000000 65535 f \n")
+        for object_id in range(1, object_count + 1):
+            pdf.extend(f"{offsets[object_id]:010d} 00000 n \n".encode("ascii"))
+        pdf.extend(
+            f"trailer\n<< /Size {object_count + 1} /Root 1 0 R >>\n"
+            f"startxref\n{xref_offset}\n%%EOF\n".encode("ascii")
+        )
+        return bytes(pdf)
 
 
 st.set_page_config(
