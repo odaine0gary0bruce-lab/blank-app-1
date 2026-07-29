@@ -10,7 +10,121 @@ import pandas as pd
 import streamlit as st
 
 from storage import DAYS, Database
-from pdf_reports import build_schedule_pdf
+try:
+    from pdf_reports import build_schedule_pdf
+except ModuleNotFoundError as exc:
+    if exc.name != "pdf_reports":
+        raise
+
+    def build_schedule_pdf(
+        assignments,
+        crew_name: str | None = None,
+        title: str = "Final Maintenance Schedule",
+    ) -> bytes:
+        """Self-contained fallback for one-file Streamlit Cloud deployments."""
+        from collections import defaultdict
+        from html import escape
+
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import landscape, letter
+        from reportlab.lib.styles import getSampleStyleSheet
+        from reportlab.lib.units import inch
+        from reportlab.platypus import (
+            PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
+        )
+
+        rows = [dict(row) for row in assignments]
+        if crew_name:
+            rows = [row for row in rows if row.get("team_label") == crew_name]
+        rows.sort(key=lambda row: (
+            str(row.get("team_label", "")).lower(),
+            str(row.get("scheduled_date", "")),
+            str(row.get("start_at", "")),
+            str(row.get("work_order_id", "")),
+        ))
+        grouped = defaultdict(list)
+        for row in rows:
+            grouped[str(row.get("team_label") or "Unassigned Crew")].append(row)
+
+        output = io.BytesIO()
+        document = SimpleDocTemplate(
+            output,
+            pagesize=landscape(letter),
+            rightMargin=.45 * inch,
+            leftMargin=.45 * inch,
+            topMargin=.45 * inch,
+            bottomMargin=.45 * inch,
+            title=title,
+            author="Maintainly",
+        )
+        styles = getSampleStyleSheet()
+        story = [
+            Paragraph(escape(title), styles["Title"]),
+            Paragraph(
+                f"Generated {datetime.now().strftime('%Y-%m-%d %H:%M')} - "
+                f"{len(rows)} scheduled job{'s' if len(rows) != 1 else ''}",
+                styles["BodyText"],
+            ),
+            Spacer(1, 8),
+        ]
+        if not grouped:
+            story.append(Paragraph("No final schedule assignments are available.", styles["BodyText"]))
+        for crew_index, (crew, crew_rows) in enumerate(grouped.items()):
+            if crew_index:
+                story.append(PageBreak())
+            people = []
+            for row in crew_rows:
+                for person in str(row.get("assigned_technicians", "")).split(","):
+                    person = person.strip()
+                    if person and person not in people:
+                        people.append(person)
+            story.extend([
+                Paragraph(escape(crew), styles["Heading2"]),
+                Paragraph(
+                    f"<b>Crew size:</b> {len(people)} &nbsp;&nbsp; "
+                    f"<b>People:</b> {escape(', '.join(people) or 'No members listed')}",
+                    styles["BodyText"],
+                ),
+                Spacer(1, 8),
+            ])
+            table_rows = [[
+                "Date / day", "Time", "Work order", "Job", "Location", "Hours", "Status",
+            ]]
+            for row in crew_rows:
+                scheduled_date = str(row.get("scheduled_date", ""))
+                day = str(row.get("day", ""))
+                start_at = str(row.get("start_at", ""))[11:16]
+                end_at = str(row.get("end_at", ""))[11:16]
+                table_rows.append([
+                    f"{scheduled_date} / {day}" if scheduled_date else day,
+                    f"{start_at}-{end_at}" if start_at or end_at else "",
+                    str(row.get("work_order_id", "")),
+                    str(row.get("title", "")),
+                    str(row.get("location", "")),
+                    f"{float(row.get('assigned_hours', 0)):.1f}",
+                    str(row.get("status", "Scheduled")),
+                ])
+            table = Table(
+                table_rows,
+                colWidths=[
+                    1.25 * inch, .9 * inch, 1.05 * inch, 2.55 * inch,
+                    1.85 * inch, .55 * inch, .9 * inch,
+                ],
+                repeatRows=1,
+            )
+            table.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#dbeafe")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#123a70")),
+                ("GRID", (0, 0), (-1, -1), .4, colors.HexColor("#bfcee3")),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("FONTSIZE", (0, 0), (-1, -1), 8),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [
+                    colors.white, colors.HexColor("#f8fafc"),
+                ]),
+            ]))
+            story.append(table)
+        document.build(story)
+        return output.getvalue()
 
 
 st.set_page_config(
