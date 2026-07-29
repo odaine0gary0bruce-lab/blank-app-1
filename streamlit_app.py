@@ -250,16 +250,27 @@ def table_number(value: Any, default: float) -> float:
         return default
 
 
-def job_import_template_excel() -> bytes:
-    """Small optional template; every column and cell may be left incomplete."""
-    output = io.BytesIO()
+def job_import_template_excel() -> tuple[bytes, str, str]:
+    """Return an XLSX template, or a usable CSV template without openpyxl."""
     template = pd.DataFrame(columns=[
         "work_order_number", "description", "location", "due_date",
         "duration_hours", "priority", "allowed_days", "notes",
     ])
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        template.to_excel(writer, index=False, sheet_name="Jobs")
-    return output.getvalue()
+    try:
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            template.to_excel(writer, index=False, sheet_name="Jobs")
+        return (
+            output.getvalue(),
+            "maintainly-job-import-template.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    except ImportError:
+        return (
+            template.to_csv(index=False).encode("utf-8"),
+            "maintainly-job-import-template.csv",
+            "text/csv",
+        )
 
 
 def table_bool(value: Any, default: bool = True) -> bool:
@@ -1201,11 +1212,14 @@ def page_planning() -> None:
         with left:
             st.subheader("Export backlog")
             st.download_button("Download jobs CSV", data=db.jobs_csv(), file_name="maintainly-jobs.csv", mime="text/csv", type="primary")
+            template_data, template_name, template_mime = job_import_template_excel()
             st.download_button(
-                "Download optional Excel template",
-                data=job_import_template_excel(),
-                file_name="maintainly-job-import-template.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "Download optional Excel template"
+                if template_name.endswith(".xlsx")
+                else "Download optional CSV template",
+                data=template_data,
+                file_name=template_name,
+                mime=template_mime,
             )
         with right:
             st.subheader("Import backlog")
@@ -1273,7 +1287,9 @@ with st.sidebar:
     st.markdown("---")
     st.caption("Persistent Streamlit edition")
     st.caption(f"Database: {db.backend_label}")
-    if db.backend == "sqlite":
+    if db.startup_warning:
+        st.warning(db.startup_warning, icon="⚠️")
+    elif db.backend == "sqlite":
         st.warning(
             "Local SQLite mode: records may be reset by hosted redeployments. "
             "Add DATABASE_URL in Streamlit Secrets for managed persistence.",
