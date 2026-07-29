@@ -108,9 +108,26 @@ class Database:
         database_url: str | None = None,
     ):
         configured_url = database_url or os.getenv("DATABASE_URL", "").strip()
+        self.startup_warning = ""
+        if configured_url:
+            try:
+                import psycopg  # noqa: F401
+                from psycopg.rows import dict_row  # noqa: F401
+            except ImportError:
+                self.startup_warning = (
+                    "DATABASE_URL is configured, but the PostgreSQL driver is not installed. "
+                    "The app started in temporary SQLite mode. Add psycopg[binary]>=3.3,<4 "
+                    "to requirements.txt and reboot."
+                )
+                configured_url = ""
         self.database_url = configured_url or None
         self.backend = "postgresql" if self.database_url else "sqlite"
-        self.backend_label = "Managed PostgreSQL" if self.database_url else "Local SQLite"
+        if self.database_url:
+            self.backend_label = "Managed PostgreSQL"
+        elif self.startup_warning:
+            self.backend_label = "Temporary SQLite fallback"
+        else:
+            self.backend_label = "Local SQLite"
         self.path = Path(path or "data/maintainly.db")
         if self.backend == "sqlite":
             self.path.parent.mkdir(parents=True, exist_ok=True)
