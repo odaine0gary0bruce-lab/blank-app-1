@@ -1025,18 +1025,40 @@ class Database:
             return {"created": created, "warnings": warnings}
 
     def save_manual_assignment(self, data: dict[str, Any]) -> str:
+        assignment_ids = self.save_manual_assignments(data)
+        return assignment_ids[0]
+
+    def save_manual_assignments(self, data: dict[str, Any]) -> list[str]:
+        """Create one assignment row per selected crew for the same work order."""
+        raw_labels = data.get("team_labels")
+        if raw_labels is None:
+            raw_labels = [data.get("team_label")]
+        crew_names = list(dict.fromkeys(
+            str(label or "").strip() for label in raw_labels
+            if str(label or "").strip()
+        ))
+        if not crew_names:
+            raise ValueError("Select at least one active saved crew.")
+
         with self.connect() as conn:
             job = conn.execute("SELECT * FROM work_orders WHERE id=?", (data["work_order_id"],)).fetchone()
             if not job:
                 raise ValueError("Work order not found.")
-            crew_name = str(data.get("team_label") or "").strip()
-            crew = conn.execute("SELECT * FROM team_crews WHERE name=? AND active=1", (crew_name,)).fetchone()
-            if not crew:
-                raise ValueError("Select an active saved crew.")
-            technicians = [person["name"] for person in self._crew_people(conn, crew["id"])]
-            if not technicians:
-                raise ValueError("The selected saved crew has no members.")
-            assignment_id = new_id("SA")
+            selected_crews: list[tuple[dict[str, Any], list[str]]] = []
+            for crew_name in crew_names:
+                crew = conn.execute(
+                    "SELECT * FROM team_crews WHERE name=? AND active=1",
+                    (crew_name,),
+                ).fetchone()
+                if not crew:
+                    raise ValueError(f"{crew_name} is not an active saved crew.")
+                technicians = [
+                    person["name"] for person in self._crew_people(conn, crew["id"])
+                ]
+                if not technicians:
+                    raise ValueError(f"{crew_name} has no members.")
+                selected_crews.append((dict(crew), technicians))
+
             now = now_iso()
             hours = max(0.5, float(data.get("assigned_hours", 1)))
             day = str(data.get("day", job["preferred_day"] or "Monday"))
@@ -1048,24 +1070,35 @@ class Database:
                 week_start=data.get("week_start"),
             )
             day = self._date_value(scheduled_date).strftime("%A")
-            conn.execute(
-                """INSERT INTO schedule_assignments
-                   (id,work_order_id,schedule_state,day,team_label,assigned_technicians,
-                    assigned_hours,required_crew_size,mechanical_manpower,welding_manpower,
-                    priority,priority_score,location,department,notes,status,created_at,updated_at,
-                    crew_id,scheduled_date,start_at,end_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    assignment_id, job["id"], "Draft", day, crew_name, ",".join(technicians), hours,
-                    job["crew_size_required"], job["mechanical_manpower"], job["welding_manpower"],
-                    job["priority"], job["priority_score"], job["location"], job["department"],
-                    data.get("notes", job["notes"]), "Scheduled", now, now, crew["id"],
-                    scheduled_date, start_at, end_at,
-                ),
-            )
+            assignment_ids: list[str] = []
+            for crew, technicians in selected_crews:
+                assignment_id = new_id("SA")
+                conn.execute(
+                    """INSERT INTO schedule_assignments
+                       (id,work_order_id,schedule_state,day,team_label,assigned_technicians,
+                        assigned_hours,required_crew_size,mechanical_manpower,welding_manpower,
+                        priority,priority_score,location,department,notes,status,created_at,updated_at,
+                        crew_id,scheduled_date,start_at,end_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        assignment_id, job["id"], "Draft", day, crew["name"],
+                        ",".join(technicians), hours, job["crew_size_required"],
+                        job["mechanical_manpower"], job["welding_manpower"],
+                        job["priority"], job["priority_score"], job["location"],
+                        job["department"], data.get("notes", job["notes"]),
+                        "Scheduled", now, now, crew["id"], scheduled_date, start_at, end_at,
+                    ),
+                )
+                self._history(
+                    conn,
+                    assignment_id,
+                    "Manual assignment",
+                    "",
+                    f"Draft - {crew['name']}",
+                )
+                assignment_ids.append(assignment_id)
             conn.execute("UPDATE work_orders SET status='Draft Scheduled',updated_at=? WHERE id=?", (now, job["id"]))
-            self._history(conn, assignment_id, "Manual assignment", "", "Draft")
-            return assignment_id
+            return assignment_ids
 
     def update_assignment(self, assignment_id: str, data: dict[str, Any]) -> None:
         with self.connect() as conn:
