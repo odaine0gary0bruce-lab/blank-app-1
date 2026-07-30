@@ -482,6 +482,27 @@ def table_number(value: Any, default: float) -> float:
         return default
 
 
+def save_selected_crew_assignments(
+    database: Database,
+    payload: dict[str, Any],
+    crew_names: list[str],
+) -> list[str]:
+    """Support both current storage and older Cloud copies during deployment."""
+    if hasattr(database, "save_manual_assignments"):
+        return database.save_manual_assignments({
+            **payload,
+            "team_labels": crew_names,
+        })
+
+    assignment_ids: list[str] = []
+    for crew_name in crew_names:
+        assignment_ids.append(database.save_manual_assignment({
+            **payload,
+            "team_label": crew_name,
+        }))
+    return assignment_ids
+
+
 def job_import_template_excel() -> tuple[bytes, str, str]:
     """Return an XLSX template, or a usable CSV template without openpyxl."""
     template = pd.DataFrame(columns=[
@@ -956,14 +977,13 @@ def manual_assignment_form() -> None:
             st.error("Select at least one crew.")
         else:
             try:
-                assignment_ids = db.save_manual_assignments({
+                assignment_ids = save_selected_crew_assignments(db, {
                     "work_order_id": work_order_id,
                     "scheduled_date": scheduled_date,
                     "start_at": start_time,
-                    "team_labels": team_labels,
                     "assigned_hours": hours,
                     "notes": notes,
-                })
+                }, team_labels)
                 refresh(
                     f"{len(assignment_ids)} crew assignment(s) added to Draft for "
                     f"{work_order_id}."
