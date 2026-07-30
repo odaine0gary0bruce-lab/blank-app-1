@@ -937,20 +937,39 @@ def manual_assignment_form() -> None:
         c1, c2, c3, c4 = st.columns(4)
         scheduled_date = c1.date_input("Date", value=date.today())
         start_time = c2.time_input("Start", value=time(8, 0))
-        team_label = c3.selectbox("Assigned crew", [crew["name"] for crew in crews])
-        hours = c4.number_input("Assigned hours", min_value=.5, max_value=168.0, step=.5, value=1.0)
+        crew_options = [crew["name"] for crew in crews]
+        team_labels = c3.multiselect(
+            "Assigned crews",
+            crew_options,
+            default=[crew_options[0]],
+            help="Each selected crew receives its own editable Draft assignment row.",
+        )
+        hours = c4.number_input(
+            "Hours per crew", min_value=.5, max_value=168.0, step=.5, value=1.0,
+        )
         notes = st.text_area("Notes")
-        submitted = st.form_submit_button("Add draft assignment", type="primary", use_container_width=True)
+        submitted = st.form_submit_button(
+            "Add crew assignments", type="primary", use_container_width=True,
+        )
     if submitted:
-        db.save_manual_assignment({
-            "work_order_id": work_order_id,
-            "scheduled_date": scheduled_date,
-            "start_at": start_time,
-            "team_label": team_label,
-            "assigned_hours": hours,
-            "notes": notes,
-        })
-        refresh("Manual crew assignment added to Draft.")
+        if not team_labels:
+            st.error("Select at least one crew.")
+        else:
+            try:
+                assignment_ids = db.save_manual_assignments({
+                    "work_order_id": work_order_id,
+                    "scheduled_date": scheduled_date,
+                    "start_at": start_time,
+                    "team_labels": team_labels,
+                    "assigned_hours": hours,
+                    "notes": notes,
+                })
+                refresh(
+                    f"{len(assignment_ids)} crew assignment(s) added to Draft for "
+                    f"{work_order_id}."
+                )
+            except Exception as exc:
+                st.error(str(exc))
 
 
 def weekly_board(state: str) -> None:
